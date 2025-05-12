@@ -37,12 +37,54 @@ async function generateImage(quote, author, outputImage) {
   ctx.fillStyle = 'white';
   ctx.textAlign = 'center';
 
-  ctx.font = '60px MontserratBold';
-  ctx.fillText(quote, width / 2, height / 2 - 60);
+  // Dynamic font size and wrapping for quote
+  let fontSize = 60;
+  let lines = [];
+  let maxWidth = width * 0.85;
+  ctx.font = `${fontSize}px MontserratBold`;
 
+  function wrapText(text, font, maxWidth) {
+    ctx.font = font;
+    const words = text.split(' ');
+    let line = '';
+    const lines = [];
+    for (let n = 0; n < words.length; n++) {
+      const testLine = line + words[n] + ' ';
+      const metrics = ctx.measureText(testLine);
+      if (metrics.width > maxWidth && n > 0) {
+        lines.push(line.trim());
+        line = words[n] + ' ';
+      } else {
+        line = testLine;
+      }
+    }
+    lines.push(line.trim());
+    return lines;
+  }
+
+  // Reduce font size if needed to fit
+  while (fontSize > 30) {
+    ctx.font = `${fontSize}px MontserratBold`;
+    lines = wrapText(quote, ctx.font, maxWidth);
+    if (lines.length <= 5) break; // max 5 lines
+    fontSize -= 4;
+  }
+
+  // Calculate vertical position for centering
+  const lineHeight = fontSize * 1.2;
+  let textBlockHeight = lines.length * lineHeight;
+  let y = height / 2 - textBlockHeight / 2;
+
+  // Draw quote lines
+  ctx.font = `${fontSize}px MontserratBold`;
+  lines.forEach((line, i) => {
+    ctx.fillText(line, width / 2, y + i * lineHeight);
+  });
+
+  // Draw author if present
   if (author) {
     ctx.font = '40px MontserratRegular';
-    ctx.fillText(`- ${author}`, width / 2, height / 2 + 60);
+    ctx.fillText(`- ${author}`, width / 2, y + lines.length * lineHeight + 40);
   }
 
   const buffer = canvas.toBuffer('image/png');
@@ -53,14 +95,21 @@ function generateVideo(bgVideo, overlayImage, musicFile, outputVideo, cb) {
   ffmpeg()
     .input(bgVideo)
     .input(overlayImage)
-    .complexFilter([
-      '[0:v][1:v] overlay=0:0:format=auto'
-    ])
     .input(musicFile)
-    .outputOptions('-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-shortest')
-    .save(outputVideo)
+    .complexFilter([
+      '[0:v][1:v] overlay=0:0:format=auto[v]'
+    ])
+    .outputOptions(
+      '-map', '[v]',
+      '-map', '2:a',
+      '-c:v', 'libx264',
+      '-c:a', 'aac',
+      '-pix_fmt', 'yuv420p',
+      '-shortest'
+    )
     .on('end', () => cb(null, outputVideo))
-    .on('error', (err) => cb(err));
+    .on('error', (err) => cb(err))
+    .save(outputVideo);
 }
 
 app.post('/generate', async (req, res) => {
@@ -78,18 +127,28 @@ app.post('/generate', async (req, res) => {
     generateVideo(bgVideo, tempImage, musicPath, outputVideo, (err, videoPath) => {
       fs.unlinkSync(tempImage);
       if (err) {
-        return res.status(500).send('Video generation failed');
+        if (!res.headersSent) return res.status(500).send('Video generation failed');
+        return;
       }
-      res.download(videoPath, () => {
+      // Send the file, then clean up
+      res.download(videoPath, (downloadErr) => {
         fs.unlinkSync(videoPath);
-        // Remove the music file after sending the video
-        try { fs.unlinkSync(musicPath); } catch {}
-        // Send feedback (filename) after download
-        res.end(JSON.stringify({ filename: path.basename(videoPath) }));
+        // Remove the music file after sending the video, only if it is in uploads/ or temp location
+        try {
+          if (
+            musicPath.startsWith('uploads' + path.sep) ||
+            musicPath.startsWith('temp' + path.sep)
+          ) {
+            fs.unlinkSync(musicPath);
+          }
+        } catch {}
+        // ...do not call res.end or send another response here!
       });
     });
   } catch (e) {
-    res.status(500).send('Error: ' + e.message);
+    if (!res.headersSent) {
+      res.status(500).send('Error: ' + e.message);
+    }
   }
 });
 
